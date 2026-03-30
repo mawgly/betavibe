@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────
 // WORLD DATA, CHUNK GENERATION, MESH BUILDING, CHUNK MGMT
 // ─────────────────────────────────────────────────────────
-import { BLOCKS, makeMaterialsForBlock } from './blocks.js';
+import { BLOCKS, makeMaterialsForBlock, blockTextures } from './blocks.js';
 import { smoothNoise, hash2 } from './noise.js';
 import { scene } from './renderer.js';
 import { player } from './state.js';
@@ -17,6 +17,16 @@ export const chunkMeshes = new Map();
 export const dirtyChunks = new Set();
 
 const geo = new THREE.BoxGeometry(1, 1, 1);
+
+// Flat plane for water surfaces — avoids z-fighting between adjacent water cubes
+const waterGeo = (() => {
+  const g = new THREE.PlaneGeometry(1, 1);
+  g.rotateX(-Math.PI / 2);
+  return g;
+})();
+
+// Water and air are transparent — solid blocks adjacent to them should show their faces
+function isTransparent(b) { return b === 0 || b === BLOCKS.WATER; }
 
 export function chunkKey(cx, cz) { return `${cx},${cz}`; }
 
@@ -123,6 +133,7 @@ export function buildChunkMesh(cx, cz) {
 
   const data = getChunk(cx, cz);
   const positions = {}; // blockType -> [x,y,z, ...]
+  const waterPos  = []; // water surface top-face positions only
 
   for (let lx = 0; lx < CHUNK_SIZE; lx++) {
     for (let y = 0; y < WORLD_HEIGHT; y++) {
@@ -131,10 +142,21 @@ export function buildChunkMesh(cx, cz) {
         if (b === 0) continue;
         const wx = cx * CHUNK_SIZE + lx;
         const wz = cz * CHUNK_SIZE + lz;
+
+        if (b === BLOCKS.WATER) {
+          // Only render the water surface (top face) where air is directly above.
+          // Using a flat plane avoids coplanar z-fighting between adjacent water cubes.
+          if (getBlock(wx, y + 1, wz) === 0) {
+            waterPos.push(wx, y + 0.45, wz);
+          }
+          continue;
+        }
+
+        // Solid block: expose if any neighbour is air or transparent (water/leaves)
         const exposed = (
-          getBlock(wx+1, y, wz) === 0 || getBlock(wx-1, y, wz) === 0 ||
-          getBlock(wx, y+1, wz) === 0 || getBlock(wx, y-1, wz) === 0 ||
-          getBlock(wx, y, wz+1) === 0 || getBlock(wx, y, wz-1) === 0
+          isTransparent(getBlock(wx+1, y, wz)) || isTransparent(getBlock(wx-1, y, wz)) ||
+          isTransparent(getBlock(wx, y+1, wz)) || isTransparent(getBlock(wx, y-1, wz)) ||
+          isTransparent(getBlock(wx, y, wz+1)) || isTransparent(getBlock(wx, y, wz-1))
         );
         if (!exposed) continue;
         if (!positions[b]) positions[b] = [];
@@ -160,6 +182,29 @@ export function buildChunkMesh(cx, cz) {
     scene.add(iMesh);
     meshes.push(iMesh);
   }
+
+  // Water surface mesh: flat planes, single material, no z-fighting
+  if (waterPos.length > 0) {
+    const count = waterPos.length / 3;
+    const mat = new THREE.MeshLambertMaterial({
+      map: blockTextures[BLOCKS.WATER][2], // top-face texture
+      transparent: true,
+      opacity: 0.75,
+      side: THREE.DoubleSide,
+    });
+    const waterMesh = new THREE.InstancedMesh(waterGeo, mat, count);
+    waterMesh.castShadow = false;
+    waterMesh.receiveShadow = false;
+    const matrix = new THREE.Matrix4();
+    for (let i = 0; i < count; i++) {
+      matrix.setPosition(waterPos[i*3], waterPos[i*3+1], waterPos[i*3+2]);
+      waterMesh.setMatrixAt(i, matrix);
+    }
+    waterMesh.instanceMatrix.needsUpdate = true;
+    scene.add(waterMesh);
+    meshes.push(waterMesh);
+  }
+
   chunkMeshes.set(k, meshes);
 }
 
